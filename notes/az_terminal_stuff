@@ -1,0 +1,48 @@
+# Check what is running now (PowerShell)
+
+az vm list -d -o table
+# VM: PowerState should say VM deallocated when you are not using it. VM running means compute is billing.
+
+az network bastion list -g rg-intern-lab -o table
+# Bastion: the output should be empty.
+
+az network public-ip list -g rg-intern-lab -o table
+# Public IPs: the output should be empty, unless you are mid-session
+
+
+# 1. Check the region and size
+az account show -o table
+az vm list-skus -l southafricanorth --size Standard_B2s -o table
+The first confirmed which subscription you were signed in to.
+The second showed that only Standard_B2s_v2 was offered in southafricanorth, with no restrictions.
+
+# 2. Check quota
+az vm list-usage -l southafricanorth -o table | Select-String "BS|Total Regional"
+
+It showed a limit of 4 vCPUs for Total Regional vCPUs and for the Standard Bsv2 Family, and you use 2.
+
+# 3. Register and confirm the providers
+foreach ($p in "Microsoft.Compute","Microsoft.Network","Microsoft.KeyVault","Microsoft.Storage","Microsoft.RecoveryServices","Microsoft.OperationalInsights","Microsoft.Insights","Microsoft.Maintenance","Microsoft.Authorization") { az provider register --namespace $p }
+az provider show -n Microsoft.Compute --query registrationState -o tsv
+az provider show -n Microsoft.Network --query registrationState -o tsv
+# The foreach loop turns on each service. I never saw its output, so I can’t confirm you ran it.
+# The two az provider show commands are the ones you ran and pasted. Both printed Registered.
+
+# 4. Check the SSH key and the resource group
+powershell
+Test-Path "$HOME\.ssh\id_ed25519.pub"
+az group list -o table
+# Test-Path printed True.
+# az group list showed rg-intern-lab in southafricanorth.
+
+# 5. Create the VM
+az vm create -g rg-intern-lab -n vm-lab01 --image Ubuntu2404 --size Standard_B2s_v2 `
+  --admin-username azureuser --ssh-key-values "$HOME/.ssh/id_ed25519.pub" `
+  --public-ip-address '""' --nsg-rule NONE --tags owner=sandra environment=lab
+# --ssh-key-values gave key-only login.
+# --public-ip-address '""' gave no public IP.
+# --nsg-rule NONE gave no inbound rules.
+
+# 6. Verify
+az vm list -d -o table
+# PublicIps was empty and PowerState was VM running.
