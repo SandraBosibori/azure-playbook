@@ -1,0 +1,128 @@
+# Recipe 3.2: Leave the door open, then catch it
+
+**Goal:** learn to find exposed management ports, the most common finding in real cloud reviews.
+
+**Environment:** `rg-intern-lab`, NSG `vm-lab01NSG`, VM `vm-lab01` (no public IP).
+
+**Status:** bad rule created and found with the CLI. Resource Graph, Defender notes and deletion still to confirm (see the end of this file).
+
+---
+
+## What I did
+
+### 1. Find the NSG name
+
+```powershell
+az network nsg list -g rg-intern-lab -o table
+```
+
+Lists the network security groups in my resource group. Result: `vm-lab01NSG`, `Succeeded`.
+
+### 2. Create the deliberately bad rule
+
+```powershell
+az network nsg rule create -g rg-intern-lab --nsg-name vm-lab01NSG -n BAD-ssh-any `
+  --priority 100 --direction Inbound --access Allow --protocol Tcp `
+  --source-address-prefixes '*' --destination-port-ranges 22
+```
+
+| Part | Meaning |
+|---|---|
+| `-n BAD-ssh-any` | Name of the rule |
+| `--priority 100` | Checked first (lowest number wins) |
+| `--direction Inbound` | Traffic coming in |
+| `--access Allow` | Let it through |
+| `--protocol Tcp` | SSH uses TCP |
+| `--source-address-prefixes '*'` | From anywhere on the internet |
+| `--destination-port-ranges 22` | To the SSH port |
+
+The rule allows SSH from anywhere. `vm-lab01` has no public IP, so nothing can actually reach it, but scanners still flag the rule itself. Result: `"provisioningState": "Succeeded"`.
+
+---
+
+## Finding it three ways
+
+### Method (a): the CLI
+
+```powershell
+az network nsg rule list -g rg-intern-lab --nsg-name vm-lab01NSG -o table
+```
+
+Result: one row, `BAD-ssh-any`, priority 100, source `*`, `Allow`, `Tcp`, `Inbound`, destination port `22`.
+
+### Method (c): Azure Resource Graph
+
+```powershell
+$q = @'
+Resources
+| where type =~ 'microsoft.network/networksecuritygroups'
+| mv-expand rule = properties.securityRules
+| where rule.properties.direction =~ 'Inbound' and rule.properties.access =~ 'Allow'
+| extend src = tostring(rule.properties.sourceAddressPrefix), srcs = tostring(rule.properties.sourceAddressPrefixes)
+| where src in ('*', '0.0.0.0/0', 'Internet', 'Any') or srcs has '0.0.0.0/0'
+| project subscriptionId, resourceGroup, nsg = name, rule = tostring(rule.name), port = tostring(rule.properties.destinationPortRange), ports = tostring(rule.properties.destinationPortRanges)
+'@
+az graph query -q $q --first 1000 -o table
+```
+
+Finds every inbound allow rule open to the internet (`*`, `0.0.0.0/0`, `Internet`, `Any`) across all NSGs at once.
+
+Result: `<fill in: did it list vm-lab01NSG / BAD-ssh-any / port 22? how long after creating the rule?>`
+
+### Method (b): Microsoft Defender for Cloud
+
+Portal, then Defender for Cloud, then Recommendations.
+
+Result: Defender listed **2 affected resources**: `vm-lab01` and a second resource with a long name and a key icon (`<fill in: its resource type from az resource list>`). The columns risk factors, attack paths, owner and status were blurred, which I believe means they need a paid Defender plan (CSPM). I did not turn it on.
+
+- Recommendation title: `<fill in>`
+- Time until it appeared: `<fill in>`
+
+---
+
+## Comparison
+
+| Method | Speed | Coverage | Effort |
+|---|---|---|---|
+| CLI (`az network nsg rule list`) | Instant | One NSG per command, so I must already know its name | Low |
+| Resource Graph | `<fill in: seconds to minutes>` | Every NSG in every subscription in one query | Medium: needs the query |
+| Defender for Cloud | `<fill in: minutes to hours>` | Broadest: flags more than NSG rules, but detail columns need a paid plan | Low once enabled |
+
+**Which I would use first:** `<fill in, in my own words>`
+
+---
+
+## Delete the rule
+
+```powershell
+az network nsg rule delete -g rg-intern-lab --nsg-name vm-lab01NSG -n BAD-ssh-any
+az network nsg rule list -g rg-intern-lab --nsg-name vm-lab01NSG -o table
+```
+
+The second command should print nothing, which confirms the rule is gone.
+
+---
+
+## What I learned
+
+- An NSG rule that allows SSH or RDP from `*` is the most common finding in real reviews.
+- The rule is only harmless in my lab because the VM has no public IP. If a public IP were added later, the rule would expose the VM.
+- The same finding shows up through three tools that differ in speed, coverage and effort.
+- Defender's free tier shows the recommendation, but detail columns need a paid plan.
+- Never leave a deliberately bad rule in place overnight.
+
+## Taste test
+
+- [x] The rule was created (`Succeeded`)
+- [x] Method (a), the CLI, showed it
+- [ ] Method (c), Resource Graph, showed it
+- [ ] Method (b), Defender, showed it
+- [ ] After deletion, the CLI list no longer shows `BAD-ssh-any`
+
+## Still to confirm and add
+
+- [ ] Fill in every `<fill in>` above
+- [ ] Save the Resource Graph query as `kql/open-management-ports.kql` (reused in Recipe 4.3)
+- [ ] Delete the rule and tick the last taste-test box
+
+> Do not paste my subscription ID into this file. It appears in the `id` line of the CLI output.
