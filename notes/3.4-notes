@@ -1,0 +1,155 @@
+# Recipe 3.4: A storage account with the shutters down
+
+**Goal:** storage that can't leak publicly, shared only through a short-lived read-only link.
+
+**Environment:** `rg-intern-lab`, storage account `1ststorage`, container `test`, blob `hello.txt` (test text only).
+
+**Status:** complete.
+
+---
+
+## The idea in plain English
+
+- A **storage account** holds files (blobs). Misconfigured storage is a classic breach source, because one wrong setting can make files readable by anyone on the internet.
+- I created the account with the dangerous options **off from the start**.
+- To share a file, I used a **SAS** (shared access signature): a link that grants one permission, on one file, until a set time. It is a temporary pass, not a permanent key.
+- I used a **user-delegation SAS**, signed with my Entra sign-in. The alternative is signing with an **account key**, which is an all-powerful password for the whole account.
+
+---
+
+## What I did
+
+### 1. Create the account with the shutters down
+
+```powershell
+$SA = "1ststorage"
+az storage account create -g rg-intern-lab -n $SA -l southafricanorth --sku Standard_LRS --allow-blob-public-access false --min-tls-version TLS1_2 --https-only true
+```
+
+| Flag | Meaning |
+|---|---|
+| `--sku Standard_LRS` | Cheapest redundancy: three copies in one datacentre |
+| `--allow-blob-public-access false` | Nobody can make a container public, even later |
+| `--min-tls-version TLS1_2` | Rejects older, weaker encryption |
+| `--https-only true` | Rejects plain HTTP |
+
+Storage account names are lowercase letters and numbers only, 3 to 24 characters, and unique across Azure.
+
+**Verify:**
+
+```powershell
+az storage account show -n $SA -g rg-intern-lab --query "{PublicBlob:allowBlobPublicAccess, MinTLS:minimumTlsVersion, HttpsOnly:enableHttpsTrafficOnly}" -o table
+```
+
+Result: `PublicBlob False`, `MinTLS TLS1_2`, `HttpsOnly True`.
+
+### 2. Give myself a data role
+
+```powershell
+$SA_ID = az storage account show -n $SA -g rg-intern-lab --query id -o tsv
+$ME = az ad signed-in-user show --query id -o tsv
+az role assignment create --role "Storage Blob Data Contributor" --assignee-object-id $ME --assignee-principal-type User --scope $SA_ID
+```
+
+- `$SA_ID` is the account's resource ID, used as the **scope** (where the permission applies).
+- `$ME` is my user's object ID in Entra.
+- Owner manages the account itself (management plane) but cannot read or write the blobs inside it (data plane). `Storage Blob Data Contributor` is the data-plane role.
+
+### 3. Create a container and upload a test file
+
+```powershell
+az storage container create --account-name $SA -n test --auth-mode login
+Set-Content -Path "$env:TEMP\hello.txt" -Value "hello from recipe 3.4"
+az storage blob upload --account-name $SA -c test -n hello.txt -f "$env:TEMP\hello.txt" --auth-mode login
+```
+
+- `--auth-mode login` uses my Entra sign-in and role. **No account key was used.**
+- The test file was in my temp folder, so it could not be committed to Git by accident. I deleted it afterwards with `Remove-Item "$env:TEMP\hello.txt"`.
+
+Result: the container was created (`"created": true`) and the upload succeeded with `"request_server_encrypted": true`, meaning Azure encrypted the file at rest.
+
+### 4. Prove the blob is not public
+
+```powershell
+$URL = "https://$SA.blob.core.windows.net/test/hello.txt"
+curl.exe -s -o NUL -w "%{http_code}" $URL
+```
+
+- `curl.exe` (with `.exe`) is the real curl. Plain `curl` in PowerShell is a different command.
+- `-s` is silent, `-o NUL` throws away the body, and `-w "%{http_code}"` prints only the HTTP status code.
+
+Result: `409`. The anonymous request was refused, so the blob URL alone does not work. The point is that it is not `200`.
+
+### 5. Share it with a 10-minute read-only link
+
+```powershell
+$EXP = (Get-Date).ToUniversalTime().AddMinutes(10).ToString("yyyy-MM-dd'T'HH:mm'Z'")
+$SAS_URL = az storage blob generate-sas --account-name $SA -c test -n hello.txt --permissions r --expiry $EXP --auth-mode login --as-user --full-uri -o tsv
+curl.exe -s $SAS_URL
+```
+
+| Part | Meaning |
+|---|---|
+| `$EXP` | Current UTC time plus 10 minutes (a SAS expiry is in UTC) |
+| `--permissions r` | Read only |
+| `--as-user` | Signed with my Entra identity (user delegation), not the account key |
+| `--full-uri` | Prints the complete, ready-to-open URL |
+
+Result: the link printed `hello from recipe 3.4`.
+
+### 6. Watch it expire
+
+After the expiry time had passed, I ran the same request again:
+
+```powershell
+curl.exe -s $SAS_URL
+```
+
+Result: `AuthenticationFailed`. Azure's detail said the signed expiry time (15:31 UTC) must be after the signed start time (15:38 UTC). In plain terms, the link had expired and Azure refused it. The file was no longer served.
+
+Then I cleared the variable so the old link did not stay in my session:
+
+```powershell
+Remove-Variable SAS_URL
+```
+
+---
+
+## Checklist: storage settings to check on every client account
+
+| Setting | What I want | Why |
+|---|---|---|
+| Blob public access | Disabled | Stops anyone making a container public |
+| Secure transfer (HTTPS only) | Enabled | No plain HTTP |
+| Minimum TLS version | 1.2 or higher | No weak encryption |
+| Shared key (account key) access | Disabled where possible | Account keys are all-powerful passwords. Use Entra roles instead |
+| Network access | Restricted to a private endpoint or known IP ranges | `defaultAction` was `Allow` on mine, so any network could reach it (sign-in still required) |
+| Sharing method | User-delegation SAS, read-only, short expiry | A leaked link then works briefly and for one file |
+| Role assignments | Data-plane roles scoped to this account | No broad Owner or Contributor for data access |
+| Redundancy | Chosen on purpose (LRS, ZRS, GRS) | Matches how much data loss the client can accept |
+| Tags | `owner`, `environment`, `client` | Shows who owns it |
+| Logging | Diagnostic logs sent to a workspace | Lets me see who accessed what |
+
+On my account, `allowSharedKeyAccess` was `null` (not explicitly set) and `networkRuleSet.defaultAction` was `Allow`. I did not change them for this recipe, but both go on the checklist for real accounts.
+
+---
+
+## What I learned
+
+- Turning off public access at creation is safer than fixing it later.
+- Owner cannot read blobs by default. Data access needs a data-plane role, the same management-plane versus data-plane split as in Recipe 3.3.
+- A user-delegation SAS is better than an account-key SAS, because it is tied to an identity and a role, and no all-powerful key is involved.
+- A SAS link is a secret while it is valid, so I never paste it into chat, notes or Git.
+- A short expiry limits the damage if a link leaks.
+
+## Taste test
+
+- [x] The SAS link worked
+- [x] The SAS link stopped working after expiry (`AuthenticationFailed`)
+- [x] The blob URL without a SAS returned an error (`409`)
+
+## Not done
+
+- Stretch (private endpoint into the VM's VNet): skipped, because it adds cost and time and the recipe does not require it.
+
+> Never put a SAS link, an account key or my subscription ID in this file.
