@@ -1,0 +1,95 @@
+# Recipe 3.5: MFA through Conditional Access, tasted before served
+
+**Goal:** the habit of testing identity policies in **report-only** mode before they can lock anyone out.
+
+**Environment:** a separate sandbox Entra tenant (`Pamoja050`), created when I started an Entra ID P2 trial. It is **not** linked to my Azure subscription, so none of my lab resources were involved.
+
+**Status:** complete.
+
+---
+
+## The idea in plain English
+
+- **Conditional Access (CA)** is a rule engine that runs at every sign-in: if a user signs in under these conditions, require this.
+- **MFA** means proving who you are in two ways, so a stolen password alone isn't enough.
+- **Legacy authentication** means old sign-in protocols that can't do MFA. Attackers like them because they walk around MFA rules.
+- **Report-only mode** evaluates a policy at every sign-in and logs what it *would* have done, without enforcing it. A bad CA policy can lock a whole company out, so I always test in report-only first.
+
+---
+
+## Cost and safety notes
+
+- The P2 trial is billed through the Microsoft 365 admin center. It was set to **renew yearly by default**, so I changed it to **cancel on expiration**. It ends on 9 December 2026.
+- Entering a company name during the trial created a **second tenant** (`Pamoja050`). My Azure subscription stayed in my original tenant, so `az` commands kept working there, and the Entra work was done in the browser.
+- **Security defaults** was enabled. I disabled it on 10th November 2026 so I could use Conditional Access, and re-enabled it on 12 November 2026. It accepted being turned back on while the two report-only policies existed.
+- Passwords for the test accounts and the break-glass account are stored in a password manager or on paper, never in chat, notes or Git (Kitchen Rule 4).
+
+---
+
+## What I built
+
+| Item | Detail | Why |
+|---|---|---|
+| Test users | `catest1`, `catest2`, each with the P2 licence | Fake accounts the policies apply to, so no real person is affected |
+| Break-glass account | `breakglass`, Global Administrator, long random password stored offline, no licence, excluded from every policy | If a policy ever goes wrong, this account can still sign in and fix it |
+| Group | `CA-Pilot`, containing only `catest1` and `catest2` | A mistake can only reach two fake users |
+| Policy 1 | `CA-001 Require MFA - Pilot (report-only)`: include `CA-Pilot`, exclude `breakglass`, all resources, grant = require MFA | Tests the "second proof" rule |
+| Policy 2 | `CA-002 Block legacy auth - Pilot (report-only)`: include `CA-Pilot`, exclude `breakglass`, client apps = Exchange ActiveSync and other clients, grant = block | Tests the "no old sign-in methods" rule |
+
+Both policies were set to **Report-only**. Licences were assigned in the Microsoft 365 admin center, and each user needed a usage location (Kenya) first.
+
+---
+
+## What I did to test
+
+1. Reset the test users' passwords, because I had not saved the generated ones.
+2. Signed in as `catest1`, then `catest2`, in a private window at myapps.microsoft.com, changing the password at first sign-in.
+3. MFA at sign-in: **skipped**. Both test users signed in with only a password, which is why the MFA policy reported "user action required": if it had been enforced, they would have had to register for or complete MFA before getting in.
+4. Opened **Sign-in logs**, picked a sign-in, and read the **Report-only** tab.
+
+---
+
+## Results
+
+Each test user had 4 sign-in rows: 2 with status **Interrupted** and 2 with status **Success**. Every row listed both policies:
+
+| Policy | Report-only result | Meaning |
+|---|---|---|
+| Require MFA | **User action required** | Would have interrupted the sign-in until the user completed MFA |
+| Block legacy auth | **Not applied** | The sign-in used a browser, a modern client, so the conditions did not match |
+
+Each test user had 4 sign-in rows. The **Interrupted** rows and the **Success** rows were the same logins: each sign-in paused for a user step (such as the forced password change), then finished with status Success.
+
+**Nobody was blocked.** Both policies were report-only, and the sign-ins finished with status Success.
+
+## What each policy would have done
+
+- **Require MFA:** it would have interrupted every sign-in by the two test users until they completed MFA.
+- **Block legacy auth:** nothing, for these sign-ins. It would only stop clients using old protocols, such as a mail app using basic authentication.
+
+## Who would have been affected if I had switched them on
+
+- Members of `CA-Pilot`: `catest1` and `catest2`.
+- Not affected: `breakglass`, because it is excluded, and my own admin account, because it is not in the group.
+
+---
+
+## What I learned
+
+- Report-only turns a risky change into a safe experiment: I see who a policy would hit before it hits anyone.
+- A test user that signs in with only a password triggers "user action required" on an MFA policy, which is the expected result.
+- A policy that shows "not applied" is not broken. Its conditions simply did not match that sign-in.
+- Excluding a break-glass account from every policy is what stops a mistake from locking me out of my own tenant. In a real organisation it would also have a hardware security key and an alert on every use.
+- Starting small (a pilot group) limits the damage of any error. A real rollout would go from report-only, to a pilot group, to everyone.
+- Licensing matters: Conditional Access needs P1 or higher, and every user a policy covers needs a licence.
+- A tenant is a separate directory. My Azure subscription and the sandbox tenant were separate, which kept the experiment away from my lab resources.
+
+## Taste test
+
+- [x] The sign-in log shows each policy's result without anyone being blocked
+
+## Not done
+
+- Enforcing either policy. The recipe only asks for report-only.
+
+> Never put passwords, tenant IDs, subscription IDs or my full sign-in name in this file.
