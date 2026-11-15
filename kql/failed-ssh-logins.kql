@@ -1,0 +1,8 @@
+// Finds failed SSH logins on vm-lab01 in the last 24 hours (Recipe 3.6)
+
+Syslog
+| where TimeGenerated > ago(72h)
+| where Facility in ("auth", "authpriv")
+| where SyslogMessage has_any ("Failed password", "Invalid user", "Connection closed by authenticating user")
+| project TimeGenerated, Computer, SyslogMessage
+| order by TimeGenerated desc

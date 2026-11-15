@@ -1,0 +1,8 @@
+//Count failures per 15 minutes
+
+Syslog
+| where TimeGenerated > ago(24h)
+| where Facility in ("auth", "authpriv")
+| where SyslogMessage has_any ("Failed password", "Invalid user", "Connection closed by authenticating user")
+| summarize failures = count() by bin(TimeGenerated, 15m)
+| order by TimeGenerated desc
