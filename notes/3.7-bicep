@@ -1,0 +1,68 @@
+# Recipe 3.7: The same dish every time (infrastructure as code)
+
+**Goal:** rebuild a secure setup from one command, so nothing depends on clicking in the portal.
+
+**Status:** complete, except the mentor's review of the pull request.
+
+---
+
+## The idea in plain words
+
+- **Infrastructure as code** means writing down what to build in a file, instead of building it by hand.
+- **Bicep** is Azure's language for that file. It describes what I want to end up with, and Azure works out the steps.
+- The file is like a **recipe card**: Azure follows it, and a colleague can read it before anything is built.
+- It is the same secure VM as Recipe 3.1, rebuilt from a file.
+
+## What my file builds
+
+| Block | Plain meaning |
+|---|---|
+| Network security group | A firewall with **no custom rules**, so Azure's default blocks everything coming in from the internet |
+| Virtual network and one subnet | The private network the VM sits on, with the firewall attached |
+| Network interface | The VM's plug into that network, with a private address only |
+| Virtual machine | Ubuntu 24.04, **password login switched off**, only my SSH key accepted |
+
+**The key point:** the secure setup comes from what the file leaves out. It has no public IP address and no inbound rule, so the VM cannot be reached from the internet.
+
+Azure works out the build order from the references between blocks: firewall, then network, then network card, then VM.
+
+## What I did
+
+1. Created a separate resource group, `rg-intern-iac`, so deleting it could not touch my first lab (`rg-intern-lab`).
+2. Wrote `bicep/main.bicep`.
+3. Checked the syntax: `az bicep build -f bicep/main.bicep --stdout | Out-Null`. No errors.
+4. **Previewed** it: `az deployment group what-if ...`. It showed four things to create.
+5. Asked Azure to accept it without building: `az deployment group validate ...`. Result: `Succeeded`.
+6. **Built** it: `az deployment group create -g rg-intern-iac -f bicep/main.bicep -p adminPublicKey="$KEY" -n deploy-iac-1`. Took about 51 seconds.
+7. Checked the result:
+   - `az vm list -g rg-intern-iac -d -o table`: `vm-lab02` running, **no public IP**.
+   - `az network public-ip list -g rg-intern-iac -o table`: empty.
+   - `az network nsg rule list -g rg-intern-iac --nsg-name nsg-iac-lab -o table`: empty.
+8. **Deleted** the whole group, recreated it, and built again with `-n deploy-iac-2`. Took about 39 seconds, with the same result.
+9. Deleted the group again so nothing kept billing.
+10. Put the file on its own branch, `bicep-private-vm`, and opened a pull request.
+
+## Preview first, then build
+
+`what-if` and `create` are two separate commands. Nothing previews automatically, so I run `what-if` myself before every `create`. It is the same habit as report-only mode in Recipe 3.5: see what would happen before it happens.
+
+## What I learned
+
+- A Bicep file describes the end result, and Azure works out the steps.
+- A `param` is an input I can change at deploy time, and a `var` is a fixed value inside the file. The SSH key is a `param` with **no default**, so I must supply it and it is never written into the file.
+- Safe settings can come from leaving things out: no public IP block means no public IP.
+- Deleting and rebuilding from the same file gave the same result, which proves the file is the recipe and not my memory.
+- Deleting the resource group also deletes Azure's history of the deployments, so **the file in Git is the lasting record**.
+- A pull request is a request for someone to review a change before it joins the main version.
+
+## Not part of this file
+
+Bastion, the backup vault, monitoring and the managed identity from my first VM. I added those by hand, and putting them in code would be the next step.
+
+## Taste test
+
+- [x] Deleted the resources and redeployed with one command
+- [x] Got the same result both times
+- [ ] Mentor reviewed the pull request: `<fill in>`
+
+> Never put my subscription ID in this file. The deployment output contains it.
